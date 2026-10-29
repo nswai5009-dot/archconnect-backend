@@ -5,24 +5,28 @@ const url = require('url');
 const PORT = process.env.PORT || 5000;
 
 // ======================
+// CONFIG
+// ======================
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'ArchConnect2026';
+const adminTokens = new Set();
+
+// ======================
 // IN-MEMORY DATABASE
 // ======================
 let companies = [];
 let projects = [];
 let payments = [];
 
-// Helper: send JSON response
 function sendJSON(res, statusCode, data) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
   });
   res.end(JSON.stringify(data));
 }
 
-// Helper: read request body
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -38,35 +42,129 @@ function readBody(req) {
   });
 }
 
-// ======================
-// CREATE SERVER
-// ======================
+function isAdmin(req) {
+  const auth = req.headers['authorization'] || '';
+  const token = auth.replace('Bearer ', '');
+  return adminTokens.has(token);
+}
+
+function publicProject(p) {
+  return {
+    id: p.id,
+    projectType: p.projectType,
+    location: p.location,
+    budget: p.budget,
+    timeline: p.timeline,
+    description: p.description,
+    status: p.status,
+    createdAt: p.createdAt
+  };
+}
+
+function publicCompany(c) {
+  return {
+    id: c.id,
+    companyName: c.companyName,
+    location: c.location,
+    yearsInOperation: c.yearsInOperation,
+    description: c.description,
+    staff: c.staff,
+    verified: c.verified,
+    createdAt: c.createdAt
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const path = parsedUrl.pathname;
   const method = req.method;
 
-  // Handle CORS preflight
   if (method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization'
     });
     return res.end();
   }
 
   try {
-    // Health Check
     if (path === '/' && method === 'GET') {
       return sendJSON(res, 200, {
         status: 'success',
         message: 'ArchConnect Backend is running successfully!',
-        version: '1.0.0'
+        version: '1.1.0'
       });
     }
 
-    // POST /api/projects
+    // ADMIN LOGIN
+    if (path === '/api/admin/login' && method === 'POST') {
+      const body = await readBody(req);
+      if (body.password === ADMIN_PASSWORD) {
+        const token = randomUUID();
+        adminTokens.add(token);
+        return sendJSON(res, 200, {
+          success: true,
+          token,
+          message: 'Admin login successful'
+        });
+      }
+      return sendJSON(res, 401, { success: false, error: 'Wrong password' });
+    }
+
+    // ADMIN FULL PROJECTS
+    if (path === '/api/admin/projects' && method === 'GET') {
+      if (!isAdmin(req)) {
+        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
+      }
+      return sendJSON(res, 200, {
+        success: true,
+        count: projects.length,
+        projects: projects
+      });
+    }
+
+    // ADMIN FULL COMPANIES
+    if (path === '/api/admin/companies' && method === 'GET') {
+      if (!isAdmin(req)) {
+        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
+      }
+      return sendJSON(res, 200, {
+        success: true,
+        count: companies.length,
+        companies: companies
+      });
+    }
+
+    // ADMIN DELETE PROJECT
+    if (path.startsWith('/api/admin/projects/') && method === 'DELETE') {
+      if (!isAdmin(req)) {
+        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
+      }
+      const id = path.split('/')[4];
+      const before = projects.length;
+      projects = projects.filter(p => p.id !== id);
+      return sendJSON(res, 200, {
+        success: true,
+        message: projects.length < before ? 'Project deleted' : 'Project not found'
+      });
+    }
+
+    // ADMIN VERIFY COMPANY
+    if (path.startsWith('/api/admin/companies/') && path.endsWith('/verify') && method === 'POST') {
+      if (!isAdmin(req)) {
+        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
+      }
+      const id = path.split('/')[4];
+      const company = companies.find(c => c.id === id);
+      if (!company) {
+        return sendJSON(res, 404, { success: false, error: 'Company not found' });
+      }
+      company.verified = true;
+      return sendJSON(res, 200, { success: true, message: 'Company verified', company });
+    }
+
+    // PUBLIC POST PROJECT
     if (path === '/api/projects' && method === 'POST') {
       const body = await readBody(req);
       const { clientName, email, phone, location, projectType, description, budget, timeline } = body;
@@ -93,13 +191,13 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 201, {
         success: true,
         message: 'Project submitted successfully!',
-        project: newProject
+        project: { id: newProject.id, status: newProject.status }
       });
     }
 
-    // GET /api/projects
+    // PUBLIC LIST PROJECTS - no private client data
     if (path === '/api/projects' && method === 'GET') {
-      const openProjects = projects.filter(p => p.status === 'open');
+      const openProjects = projects.filter(p => p.status === 'open').map(publicProject);
       return sendJSON(res, 200, {
         success: true,
         count: openProjects.length,
@@ -107,7 +205,7 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // POST /api/companies
+    // PUBLIC REGISTER COMPANY
     if (path === '/api/companies' && method === 'POST') {
       const body = await readBody(req);
       const { companyName, registrationNumber, location, yearsInOperation, description } = body;
@@ -132,20 +230,20 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 201, {
         success: true,
         message: 'Company registered successfully!',
-        company: newCompany
+        company: publicCompany(newCompany)
       });
     }
 
-    // GET /api/companies
+    // PUBLIC LIST COMPANIES
     if (path === '/api/companies' && method === 'GET') {
       return sendJSON(res, 200, {
         success: true,
         count: companies.length,
-        companies: companies
+        companies: companies.map(publicCompany)
       });
     }
 
-    // POST /api/companies/:id/staff
+    // ADD STAFF
     if (path.startsWith('/api/companies/') && path.endsWith('/staff') && method === 'POST') {
       const companyId = path.split('/')[3];
       const body = await readBody(req);
@@ -174,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // POST /api/payments/calculate
+    // COMMISSION
     if (path === '/api/payments/calculate' && method === 'POST') {
       const body = await readBody(req);
       const { projectAmount } = body;
@@ -197,53 +295,6 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // POST /api/payments/process
-    if (path === '/api/payments/process' && method === 'POST') {
-      const body = await readBody(req);
-      const { projectId, amount, paymentMethod, phoneNumber } = body;
-
-      if (!projectId || !amount || !paymentMethod) {
-        return sendJSON(res, 400, { success: false, error: 'projectId, amount and paymentMethod are required' });
-      }
-
-      const commission = Math.round(amount * 0.05);
-      const companyAmount = amount - commission;
-
-      const paymentRecord = {
-        id: randomUUID(),
-        projectId,
-        amount,
-        paymentMethod,
-        phoneNumber: phoneNumber || null,
-        commission,
-        companyAmount,
-        status: 'completed',
-        createdAt: new Date().toISOString()
-      };
-
-      payments.push(paymentRecord);
-
-      const project = projects.find(p => p.id === projectId);
-      if (project) project.status = 'paid';
-
-      return sendJSON(res, 200, {
-        success: true,
-        message: `Payment of TZS ${Number(amount).toLocaleString()} processed via ${paymentMethod}`,
-        payment: paymentRecord,
-        note: 'This is a DEMO. Real M-Pesa integration requires official APIs.'
-      });
-    }
-
-    // GET /api/payments
-    if (path === '/api/payments' && method === 'GET') {
-      return sendJSON(res, 200, {
-        success: true,
-        count: payments.length,
-        payments: payments
-      });
-    }
-
-    // 404
     sendJSON(res, 404, { success: false, error: 'Route not found' });
 
   } catch (err) {
@@ -252,7 +303,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Start server
 server.listen(PORT, () => {
-  console.log('ArchConnect Backend is ONLINE on port ' + PORT);
+  console.log('ArchConnect Backend v1.1 is ONLINE on port ' + PORT);
 });
