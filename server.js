@@ -3,19 +3,10 @@ const { randomUUID } = require('crypto');
 const url = require('url');
 
 const PORT = process.env.PORT || 5000;
-
-// ======================
-// CONFIG
-// ======================
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/rest\/v1\/?$/, '');
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'ArchConnect2026';
 const adminTokens = new Set();
-
-// ======================
-// IN-MEMORY DATABASE
-// ======================
-let companies = [];
-let projects = [];
-let payments = [];
 
 function sendJSON(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -32,11 +23,8 @@ function readBody(req) {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch (e) {
-        reject(e);
-      }
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch (e) { reject(e); }
     });
     req.on('error', reject);
   });
@@ -48,29 +36,82 @@ function isAdmin(req) {
   return adminTokens.has(token);
 }
 
+async function sb(path, options = {}) {
+  const res = await fetch(SUPABASE_URL + '/rest/v1/' + path, {
+    ...options,
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': 'Bearer ' + SUPABASE_KEY,
+      'Content-Type': 'application/json',
+      'Prefer': options.prefer || 'return=representation',
+      ...(options.headers || {})
+    }
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!res.ok) {
+    const err = new Error((data && data.message) || text || 'Supabase error');
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
 function publicProject(p) {
   return {
     id: p.id,
-    projectType: p.projectType,
+    projectType: p.project_type,
     location: p.location,
     budget: p.budget,
     timeline: p.timeline,
     description: p.description,
     status: p.status,
-    createdAt: p.createdAt
+    createdAt: p.created_at
   };
 }
 
 function publicCompany(c) {
   return {
     id: c.id,
-    companyName: c.companyName,
+    companyName: c.company_name,
     location: c.location,
-    yearsInOperation: c.yearsInOperation,
+    yearsInOperation: c.years_in_operation,
     description: c.description,
-    staff: c.staff,
+    staff: c.staff || [],
     verified: c.verified,
-    createdAt: c.createdAt
+    createdAt: c.created_at
+  };
+}
+
+function fullProject(p) {
+  return {
+    id: p.id,
+    clientName: p.client_name,
+    email: p.email,
+    phone: p.phone,
+    location: p.location,
+    projectType: p.project_type,
+    description: p.description,
+    budget: p.budget,
+    timeline: p.timeline,
+    status: p.status,
+    createdAt: p.created_at
+  };
+}
+
+function fullCompany(c) {
+  return {
+    id: c.id,
+    companyName: c.company_name,
+    registrationNumber: c.registration_number,
+    location: c.location,
+    yearsInOperation: c.years_in_operation,
+    description: c.description,
+    staff: c.staff || [],
+    verified: c.verified,
+    createdAt: c.created_at
   };
 }
 
@@ -93,216 +134,180 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, {
         status: 'success',
         message: 'ArchConnect Backend is running successfully!',
-        version: '1.1.0'
+        version: '2.0.0-db',
+        storage: 'supabase'
       });
     }
 
-    // ADMIN LOGIN
     if (path === '/api/admin/login' && method === 'POST') {
       const body = await readBody(req);
       if (body.password === ADMIN_PASSWORD) {
         const token = randomUUID();
         adminTokens.add(token);
-        return sendJSON(res, 200, {
-          success: true,
-          token,
-          message: 'Admin login successful'
-        });
+        return sendJSON(res, 200, { success: true, token, message: 'Admin login successful' });
       }
       return sendJSON(res, 401, { success: false, error: 'Wrong password' });
     }
 
-    // ADMIN FULL PROJECTS
     if (path === '/api/admin/projects' && method === 'GET') {
-      if (!isAdmin(req)) {
-        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
-      }
-      return sendJSON(res, 200, {
-        success: true,
-        count: projects.length,
-        projects: projects
-      });
+      if (!isAdmin(req)) return sendJSON(res, 401, { success: false, error: 'Admin access required' });
+      const rows = await sb('projects?select=*&order=created_at.desc');
+      return sendJSON(res, 200, { success: true, count: rows.length, projects: rows.map(fullProject) });
     }
 
-    // ADMIN FULL COMPANIES
     if (path === '/api/admin/companies' && method === 'GET') {
-      if (!isAdmin(req)) {
-        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
-      }
-      return sendJSON(res, 200, {
-        success: true,
-        count: companies.length,
-        companies: companies
-      });
+      if (!isAdmin(req)) return sendJSON(res, 401, { success: false, error: 'Admin access required' });
+      const rows = await sb('companies?select=*&order=created_at.desc');
+      return sendJSON(res, 200, { success: true, count: rows.length, companies: rows.map(fullCompany) });
     }
 
-    // ADMIN DELETE PROJECT
     if (path.startsWith('/api/admin/projects/') && method === 'DELETE') {
-      if (!isAdmin(req)) {
-        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
-      }
+      if (!isAdmin(req)) return sendJSON(res, 401, { success: false, error: 'Admin access required' });
       const id = path.split('/')[4];
-      const before = projects.length;
-      projects = projects.filter(p => p.id !== id);
-      return sendJSON(res, 200, {
-        success: true,
-        message: projects.length < before ? 'Project deleted' : 'Project not found'
-      });
+      await sb('projects?id=eq.' + id, { method: 'DELETE', prefer: 'return=minimal' });
+      return sendJSON(res, 200, { success: true, message: 'Project deleted' });
     }
 
-    // ADMIN VERIFY COMPANY
     if (path.startsWith('/api/admin/companies/') && path.endsWith('/verify') && method === 'POST') {
-      if (!isAdmin(req)) {
-        return sendJSON(res, 401, { success: false, error: 'Admin access required' });
-      }
+      if (!isAdmin(req)) return sendJSON(res, 401, { success: false, error: 'Admin access required' });
       const id = path.split('/')[4];
-      const company = companies.find(c => c.id === id);
-      if (!company) {
-        return sendJSON(res, 404, { success: false, error: 'Company not found' });
-      }
-      company.verified = true;
-      return sendJSON(res, 200, { success: true, message: 'Company verified', company });
+      const rows = await sb('companies?id=eq.' + id, {
+        method: 'PATCH',
+        body: JSON.stringify({ verified: true })
+      });
+      if (!rows || !rows.length) return sendJSON(res, 404, { success: false, error: 'Company not found' });
+      return sendJSON(res, 200, { success: true, message: 'Company verified', company: fullCompany(rows[0]) });
     }
 
-    // PUBLIC POST PROJECT
     if (path === '/api/projects' && method === 'POST') {
       const body = await readBody(req);
       const { clientName, email, phone, location, projectType, description, budget, timeline } = body;
-
       if (!clientName || !email || !location || !projectType || !budget) {
         return sendJSON(res, 400, { success: false, error: 'Please fill all required fields' });
       }
-
-      const newProject = {
+      const row = {
         id: randomUUID(),
-        clientName,
+        client_name: clientName,
         email,
         phone: phone || null,
         location,
-        projectType,
+        project_type: projectType,
         description: description || '',
         budget,
         timeline: timeline || 'Flexible',
         status: 'open',
-        createdAt: new Date().toISOString()
+        created_at: new Date().toISOString()
       };
-
-      projects.push(newProject);
+      await sb('projects', { method: 'POST', body: JSON.stringify(row) });
       return sendJSON(res, 201, {
         success: true,
         message: 'Project submitted successfully!',
-        project: { id: newProject.id, status: newProject.status }
+        project: { id: row.id, status: 'open' }
       });
     }
 
-    // PUBLIC LIST PROJECTS - no private client data
     if (path === '/api/projects' && method === 'GET') {
-      const openProjects = projects.filter(p => p.status === 'open').map(publicProject);
+      const rows = await sb('projects?status=eq.open&select=*&order=created_at.desc');
       return sendJSON(res, 200, {
         success: true,
-        count: openProjects.length,
-        projects: openProjects
+        count: rows.length,
+        projects: rows.map(publicProject)
       });
     }
 
-    // PUBLIC REGISTER COMPANY
     if (path === '/api/companies' && method === 'POST') {
       const body = await readBody(req);
       const { companyName, registrationNumber, location, yearsInOperation, description } = body;
-
       if (!companyName || !location) {
         return sendJSON(res, 400, { success: false, error: 'Company name and location are required' });
       }
-
-      const newCompany = {
+      const row = {
         id: randomUUID(),
-        companyName,
-        registrationNumber: registrationNumber || null,
+        company_name: companyName,
+        registration_number: registrationNumber || null,
         location,
-        yearsInOperation: yearsInOperation || 0,
+        years_in_operation: yearsInOperation || 0,
         description: description || '',
         staff: [],
         verified: false,
-        createdAt: new Date().toISOString()
+        created_at: new Date().toISOString()
       };
-
-      companies.push(newCompany);
+      await sb('companies', { method: 'POST', body: JSON.stringify(row) });
       return sendJSON(res, 201, {
         success: true,
         message: 'Company registered successfully!',
-        company: publicCompany(newCompany)
+        company: publicCompany(row)
       });
     }
 
-    // PUBLIC LIST COMPANIES
     if (path === '/api/companies' && method === 'GET') {
+      const rows = await sb('companies?select=*&order=created_at.desc');
       return sendJSON(res, 200, {
         success: true,
-        count: companies.length,
-        companies: companies.map(publicCompany)
+        count: rows.length,
+        companies: rows.map(publicCompany)
       });
     }
 
-    // ADD STAFF
     if (path.startsWith('/api/companies/') && path.endsWith('/staff') && method === 'POST') {
       const companyId = path.split('/')[3];
       const body = await readBody(req);
       const { name, role, experience } = body;
-
-      const company = companies.find(c => c.id === companyId);
-      if (!company) {
-        return sendJSON(res, 404, { success: false, error: 'Company not found' });
-      }
-
       if (!name || !role) {
         return sendJSON(res, 400, { success: false, error: 'Name and role are required' });
       }
-
-      company.staff.push({
-        id: randomUUID(),
-        name,
-        role,
-        experience: experience || 0
+      const rows = await sb('companies?id=eq.' + companyId + '&select=*');
+      if (!rows || !rows.length) {
+        return sendJSON(res, 404, { success: false, error: 'Company not found' });
+      }
+      const company = rows[0];
+      const staff = Array.isArray(company.staff) ? company.staff : [];
+      staff.push({ id: randomUUID(), name, role, experience: experience || 0 });
+      await sb('companies?id=eq.' + companyId, {
+        method: 'PATCH',
+        body: JSON.stringify({ staff })
       });
-
       return sendJSON(res, 200, {
         success: true,
         message: 'Staff member added successfully',
-        staff: company.staff
+        staff
       });
     }
 
-    // COMMISSION
     if (path === '/api/payments/calculate' && method === 'POST') {
       const body = await readBody(req);
       const { projectAmount } = body;
-
       if (!projectAmount || isNaN(projectAmount) || projectAmount <= 0) {
         return sendJSON(res, 400, { success: false, error: 'Valid project amount is required' });
       }
-
       const amount = Number(projectAmount);
       const commission = Math.round(amount * 0.05);
-      const amountToCompany = amount - commission;
-
       return sendJSON(res, 200, {
         success: true,
         projectAmount: amount,
         commissionRate: '5%',
         commissionAmount: commission,
-        amountToCompany: amountToCompany,
+        amountToCompany: amount - commission,
         currency: 'TZS'
       });
     }
 
     sendJSON(res, 404, { success: false, error: 'Route not found' });
-
   } catch (err) {
-    console.error('Server error:', err);
-    sendJSON(res, 500, { success: false, error: 'Internal server error' });
+    console.error('Server error:', err.message || err);
+    sendJSON(res, err.status || 500, {
+      success: false,
+      error: err.message || 'Internal server error',
+      details: err.data || null
+    });
   }
 });
 
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('Missing SUPABASE_URL or SUPABASE_KEY environment variables');
+  process.exit(1);
+}
+
 server.listen(PORT, () => {
-  console.log('ArchConnect Backend v1.1 is ONLINE on port ' + PORT);
+  console.log('ArchConnect Backend v2.0 (Supabase) ONLINE on port ' + PORT);
 });
