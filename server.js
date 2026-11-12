@@ -138,7 +138,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, {
         status: 'success',
         message: 'ArchConnect Backend is running successfully!',
-        version: '2.1.0-claims',
+        version: '2.2.0-staff',
         storage: 'supabase'
       });
     }
@@ -225,11 +225,9 @@ const server = http.createServer(async (req, res) => {
       const projectId = path.split('/')[3];
       const body = await readBody(req);
       const { companyId, companyName } = body;
-
       if (!companyName && !companyId) {
         return sendJSON(res, 400, { success: false, error: 'Company name or company ID is required' });
       }
-
       const rows = await sb('projects?id=eq.' + projectId + '&select=*');
       if (!rows || !rows.length) {
         return sendJSON(res, 404, { success: false, error: 'Project not found' });
@@ -241,10 +239,8 @@ const server = http.createServer(async (req, res) => {
           error: 'This project is already taken by ' + (project.assigned_company_name || 'another company')
         });
       }
-
       let finalCompanyName = companyName;
       let finalCompanyId = companyId || null;
-
       if (companyId) {
         const cos = await sb('companies?id=eq.' + companyId + '&select=*');
         if (cos && cos.length) {
@@ -252,7 +248,6 @@ const server = http.createServer(async (req, res) => {
           finalCompanyId = cos[0].id;
         }
       }
-
       const updated = await sb('projects?id=eq.' + projectId, {
         method: 'PATCH',
         body: JSON.stringify({
@@ -261,7 +256,6 @@ const server = http.createServer(async (req, res) => {
           assigned_company_name: finalCompanyName
         })
       });
-
       return sendJSON(res, 200, {
         success: true,
         message: 'Project requested successfully. Assigned to ' + finalCompanyName,
@@ -276,10 +270,16 @@ const server = http.createServer(async (req, res) => {
 
     if (path === '/api/companies' && method === 'POST') {
       const body = await readBody(req);
-      const { companyName, registrationNumber, location, yearsInOperation, description } = body;
+      const { companyName, registrationNumber, location, yearsInOperation, description, staff } = body;
       if (!companyName || !location) {
         return sendJSON(res, 400, { success: false, error: 'Company name and location are required' });
       }
+      const staffList = Array.isArray(staff) ? staff.filter(s => s && s.name && s.role).map(s => ({
+        id: randomUUID(),
+        name: String(s.name).trim(),
+        role: String(s.role).trim(),
+        experience: Number(s.experience) || 0
+      })) : [];
       const row = {
         id: randomUUID(),
         company_name: companyName,
@@ -287,7 +287,7 @@ const server = http.createServer(async (req, res) => {
         location,
         years_in_operation: yearsInOperation || 0,
         description: description || '',
-        staff: [],
+        staff: staffList,
         verified: false,
         created_at: new Date().toISOString()
       };
@@ -368,5 +368,5 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 server.listen(PORT, () => {
-  console.log('ArchConnect Backend v2.1 (claims) ONLINE on port ' + PORT);
+  console.log('ArchConnect Backend v2.2 (staff) ONLINE on port ' + PORT);
 });
