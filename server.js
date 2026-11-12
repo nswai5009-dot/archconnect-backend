@@ -68,6 +68,8 @@ function publicProject(p) {
     timeline: p.timeline,
     description: p.description,
     status: p.status,
+    assignedCompanyId: p.assigned_company_id || null,
+    assignedCompanyName: p.assigned_company_name || null,
     createdAt: p.created_at
   };
 }
@@ -97,6 +99,8 @@ function fullProject(p) {
     budget: p.budget,
     timeline: p.timeline,
     status: p.status,
+    assignedCompanyId: p.assigned_company_id || null,
+    assignedCompanyName: p.assigned_company_name || null,
     createdAt: p.created_at
   };
 }
@@ -134,7 +138,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, {
         status: 'success',
         message: 'ArchConnect Backend is running successfully!',
-        version: '2.0.0-db',
+        version: '2.1.0-claims',
         storage: 'supabase'
       });
     }
@@ -196,6 +200,8 @@ const server = http.createServer(async (req, res) => {
         budget,
         timeline: timeline || 'Flexible',
         status: 'open',
+        assigned_company_id: null,
+        assigned_company_name: null,
         created_at: new Date().toISOString()
       };
       await sb('projects', { method: 'POST', body: JSON.stringify(row) });
@@ -207,11 +213,64 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (path === '/api/projects' && method === 'GET') {
-      const rows = await sb('projects?status=eq.open&select=*&order=created_at.desc');
+      const rows = await sb('projects?select=*&order=created_at.desc');
       return sendJSON(res, 200, {
         success: true,
         count: rows.length,
         projects: rows.map(publicProject)
+      });
+    }
+
+    if (path.startsWith('/api/projects/') && path.endsWith('/claim') && method === 'POST') {
+      const projectId = path.split('/')[3];
+      const body = await readBody(req);
+      const { companyId, companyName } = body;
+
+      if (!companyName && !companyId) {
+        return sendJSON(res, 400, { success: false, error: 'Company name or company ID is required' });
+      }
+
+      const rows = await sb('projects?id=eq.' + projectId + '&select=*');
+      if (!rows || !rows.length) {
+        return sendJSON(res, 404, { success: false, error: 'Project not found' });
+      }
+      const project = rows[0];
+      if (project.status === 'taken' || project.assigned_company_name) {
+        return sendJSON(res, 400, {
+          success: false,
+          error: 'This project is already taken by ' + (project.assigned_company_name || 'another company')
+        });
+      }
+
+      let finalCompanyName = companyName;
+      let finalCompanyId = companyId || null;
+
+      if (companyId) {
+        const cos = await sb('companies?id=eq.' + companyId + '&select=*');
+        if (cos && cos.length) {
+          finalCompanyName = cos[0].company_name;
+          finalCompanyId = cos[0].id;
+        }
+      }
+
+      const updated = await sb('projects?id=eq.' + projectId, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status: 'taken',
+          assigned_company_id: finalCompanyId,
+          assigned_company_name: finalCompanyName
+        })
+      });
+
+      return sendJSON(res, 200, {
+        success: true,
+        message: 'Project requested successfully. Assigned to ' + finalCompanyName,
+        project: publicProject(updated[0] || {
+          ...project,
+          status: 'taken',
+          assigned_company_id: finalCompanyId,
+          assigned_company_name: finalCompanyName
+        })
       });
     }
 
@@ -309,5 +368,5 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 server.listen(PORT, () => {
-  console.log('ArchConnect Backend v2.0 (Supabase) ONLINE on port ' + PORT);
+  console.log('ArchConnect Backend v2.1 (claims) ONLINE on port ' + PORT);
 });
